@@ -1,2 +1,2 @@
 pyserial
-python-vlc
+play_sounds
