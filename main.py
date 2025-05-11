@@ -1,54 +1,58 @@
+from __future__ import annotations
 from traceback import print_exception
 
 import serial
 import serial.tools.list_ports
-import threading
 import time
+import threading
 from pathlib import Path
-import play_sounds
+from concurrent.futures import ThreadPoolExecutor, Future
+from typing import Optional
+
+from pydub import AudioSegment
+import simpleaudio as sa
 
 DEFAULT_SONG: Path = Path("sound.mp3")
 READY_SOUND: Path = Path("ready.mp3")
 TEAM_SOUND: Path = Path("team_#t#.mp3")
 
-# ⇢ optional Cache, damit die Thread-Objekte nicht vom GC gefressen werden
-_play_threads: list[threading.Thread] = []
 
+# single, reusable worker-pool → kein Thread-Spam
+_executor: ThreadPoolExecutor | None = None
 
-def play_sound(file: Path) -> threading.Thread:
-    """
-    Plays the given sound *asynchronously* in a background daemon thread
-    and returns immediately.
+def _get_executor() -> ThreadPoolExecutor:
+    global _executor
+    if _executor is None or _executor._shutdown:
+        _executor = ThreadPoolExecutor(
+            max_workers=4,              # parallel Streams ≙ max Threads
+            thread_name_prefix="sound"
+        )
+    return _executor
 
-    Parameters
-    ----------
-    file : Path
-        Path to the audio file.
-
-    Returns
-    -------
-    threading.Thread
-        The thread that runs ``play_sounds.play_file`` – useful if you ever
-        want to ``join()`` it or inspect ``exc_info()``.
-
-    Notes
-    -----
-    * Because the thread is started with ``daemon=True``, it won’t prevent
-      your program from exiting.
-    * If you need to wait later, just keep the returned object:
-        >>> t = play_sound(READY_SOUND)
-        >>> # … do other work …
-        >>> t.join()          # blocks until playback is done
-    """
-    t = threading.Thread(
-        target=play_sounds.play_file,
-        args=(file,),
-        name=f"sound-player-{len(_play_threads)}",
-        daemon=True,
+def _decode_and_play(file: Path, block: bool = True) -> sa.PlayObject:
+    """Lädt eine Audiodatei (alle FFmpeg-Formate) und spielt sie ab."""
+    seg = AudioSegment.from_file(file)           # dekodieren → PCM
+    play_obj = sa.play_buffer(
+        seg.raw_data,
+        num_channels=seg.channels,
+        bytes_per_sample=seg.sample_width,
+        sample_rate=seg.frame_rate,
     )
-    t.start()
-    _play_threads.append(t)           # keep a reference, optional
-    return t
+    if block:
+        play_obj.wait_done()                     # optionale Blockade
+    return play_obj
+
+def play_sound(file: Path, wait: bool = False) -> Future | sa.PlayObject:
+    """
+    Spielt *file* asynchron.
+    - Ist `wait=True`, wird *blocking* im aktuellen Thread abgespielt.
+    - Sonst wird der Job im Pool ausgeführt und es gibt sofort ein `Future`
+      zurück; Exceptions landen sauber in `future.result()`.
+    """
+    if wait:
+        return _decode_and_play(file, block=True)
+    # Fire-and-forget im Worker-Thread
+    return _get_executor().submit(_decode_and_play, file, False)
 
 
 def find_arduino_port():

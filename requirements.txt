@@ -1,2 +1,4 @@
 pyserial
 play_sounds
+pydub
+simpleaudio
